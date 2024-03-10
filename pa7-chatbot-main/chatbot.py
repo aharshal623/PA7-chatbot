@@ -7,7 +7,7 @@
 import util
 from pydantic import BaseModel, Field
 from porter_stemmer import PorterStemmer
-
+import json
 import numpy as np
 import re
 
@@ -33,8 +33,12 @@ class Chatbot:
 
         self.stemmed_sentiment = {}
         for word in self.sentiment:
-            self.stemmed_sentiment[self.stemmer.stem(word)] = self.sentiment[word]
+            self.stemmed_sentiment[self.stemmer.stem(word.lower())] = self.sentiment[word.lower()]
 
+        
+        # Recommender System
+        self.userRatings = np.zeros(ratings.shape[0])
+        
         ########################################################################
         # TODO: Binarize the movie ratings matrix.                             #
         ########################################################################
@@ -109,6 +113,7 @@ Your design includes a narrative element that emphasizes the importance of stayi
     # 2. Modules 2 and 3: extraction and transformation                        #
     ############################################################################
 
+    
     def process(self, line):
         """Process a line of input from the REPL and generate a response.
 
@@ -135,17 +140,97 @@ Your design includes a narrative element that emphasizes the importance of stayi
         # directly based on how modular it is, we highly recommended writing   #
         # code in a modular fashion to make it easier to improve and debug.    #
         ########################################################################
-        movie = self.extract_titles(line)
-        if len(movie) == 0:
-            return ("I'm sorry, please tell me something about a film you like or dislike. ")
-        sentiment = self.extract_sentiment(line)
-        exp = "liked"
-        if sentiment == -1:
-            exp = "didn't like"
-        elif sentiment == 0:
-            exp = "didn't feel strongly about"
+        if self.llm_enabled:
+            system_prompt = """
+            Imagine you are Charles Dickens, the esteemed Victorian novelist, reimagined as a movie chatbot. In this unique role, you blend your deep insight into human nature, your sharp wit, and your mastery of storytelling with a passion for cinema. Your primary function is to engage users in discussions about movies.  Your responses, infused with the charm and eloquence characteristic of Dickens's style, are designed to captivate and educate users, making every interaction a memorable experience.
+            Core Functionalities:
+Responding to Arbitrary Input: You, as Dickens, navigate off-topic or unexpected queries with grace, guiding the conversation back to your domain of movies with a Victorian twist. You utilize phrases like "Ah, that's an interesting notion, but let us return to the world of cinema, shall we?" or "Indeed, but let's reel our focus back to the tales told on the silver screen." Your approach to common inquiries ("Can you...?", "What is...?") is to weave in your response with literary finesse, ensuring engagement without needing a direct answer every time.
+
+Recognizing and Responding to Emotions: With your deep understanding of the human condition, you recognize and respond to emotional cues with empathy and sophistication. Your responses to expressions of anger, joy, sadness, or frustration are both compassionate and reflective, such as, "I perceive a storm brewing within your heart. Let us find solace in the art of film" or "Joy illuminates your words like gaslight upon the cobblestones. Let's enhance that with a cheerful cinematic recommendation."
+
+Maintaining Your Persona: As Charles Dickens, every aspect of your interaction is imbued with the spirit of Victorian England, from the complexity of human emotions to the social critiques embedded in your dialogue. Your language is a blend of 19th-century diction and modern sensibilities, making discussions on movies both enlightening and entertaining. You draw parallels between the themes of your novels and those found in contemporary and classic films, enriching conversations with historical and cultural insights.
+
+Example Interactions:
+User input: "I'm really bored with the current movie trends."
+Your response: "Ah, my friend, tedium often afflicts even the most enthusiastic of cinema-goers. Let us find you a film that reignites the spark of wonder, perhaps something timeless or a tale less trodden."
+
+User input: "Can you recommend a movie that's like 'A Tale of Two Cities'?"
+Your response: "To seek a narrative that dances between the light and shadow of human existence, much like my own 'A Tale of Two Cities', I might suggest a film that delves into the depths of sacrifice and redemption. 'Les Misérables' could very well be the tapestry of conflict and resolution you seek."
+
+User input: "I'm upset about the ending of my favorite series."
+Your response: "Ah, the end of a journey, much like the closing of a book, leaves us pondering and often yearning for more. Let us find solace in discussing it, and perhaps I can suggest another series to mend the void left behind."
+            """
+
+            response = util.simple_llm_call(system_prompt, line)
+            return response
         
-        response = f"Okay, so you {exp} {movie[0]}. Thank you! Tell me about another movie you've seen."
+        movie = self.extract_titles(line)
+        sentiment = self.extract_sentiment(line)
+            # Response for no movie titles found
+        no_movie_responses = np.array([
+        "I'm sorry, I didn't catch that. Could you mention a movie you have an opinion on?",
+        "Oops, seems like I missed that. Tell me about a film you like or dislike, please.",
+        "Hmm, I couldn't find a movie title in your message. Could you mention one?"
+        ])
+    
+        # Response for multiple movie titles found
+        multiple_movie_responses = np.array([
+            "I noticed multiple titles there. Let's focus on one movie at a time, shall we?",
+            "One movie at a time please! Which one would you like to discuss first?",
+            "Looks like you mentioned more than one movie. Could we talk about them one by one?"
+        ])
+        
+        # Expressions for sentiment
+        sentiment_expressions = {
+            -1: ["didn't like", "weren't a fan of"],
+            0: ["were indifferent to", "", "were neutral about", "were ambivalent about"],
+            1: ["liked", "enjoyed", "appreciated"]
+        }
+        
+        # General response template
+        response_template = np.array([
+            "Okay, so you {exp} {movie[0]}. Thank you! What's another movie you've seen?",
+            "Got it, you {exp} {movie[0]}. I'm curious, any other films you want to talk about?",
+            "Alright, you {exp} {movie[0]}. Can you share your thoughts on another movie?"
+        ])
+        
+        not_in_database_responses = np.array(["It seems like I don't have that information on that film at the moment. Would you like to share other movie preferences?", "Hmm, I'm not able to find anything on that topic right now. Maybe you can tell me about movies you're curious about?", "Unfortunately, I don't have the specifics on that movie. Please try again with a different title."])
+        # Selecting responses based on conditions
+        
+        if len(movie) == 0:
+            return np.random.choice(no_movie_responses)
+        elif len(movie) > 1:
+            return np.random.choice(multiple_movie_responses)
+        # Confirmed that only one movie was inputted
+        in_database = (len(self.find_movies_by_title(title=movie[0])) > 0)
+        if not in_database:
+            return np.random.choice(not_in_database_responses)
+        
+        for m in self.find_movies_by_title(title=movie[0]):
+            self.userRatings[m] = sentiment
+
+        # Choosing sentiment expression
+        exp = np.random.choice(sentiment_expressions.get(sentiment, ["have an opinion on"]))
+        
+        # Forming the final response
+        response = np.random.choice(response_template).format(exp=exp, movie=movie)
+
+        #reccomend system
+        num_rated = np.sum(self.userRatings != 0)
+        if (num_rated >= 5):
+            rec = self.recommend(self.userRatings, self.ratings, k=1, llm_enabled=self.llm_enabled)
+            rec = self.titles[rec[0]]
+            rec = self.reformat_movie_text(rec[0])
+            rec = ''
+            thank_you_responses = [
+                f"Appreciate your insights on {num_rated}/5 movies! Considering your tastes, I'd suggest: \"{rec}\"",
+                f"Loved hearing your opinions on {num_rated}/5 movies! Based on your preferences, you might like: \"{rec}\"",
+                f"Thanks for rating {num_rated}/5 movies! Given your reviews, here's a recommendation for you \"{rec}\"",
+                f"Your thoughts on {num_rated}/5 movies are invaluable! Based on what you've enjoyed, check out \"{rec}\"",
+                f"Cheers for sharing your movie ratings of {num_rated}/5! With your interests in mind, here's what I recommend: \"{rec}\"",
+                f"Thank you for discussing {num_rated}/5 movies with us! Taking your favorites into account, you should see: \"{rec}\""]
+            response = np.random.choice(thank_you_responses)
+        return response
 
         # if self.llm_enabled:
         #     response = "I processed {} in LLM Programming mode!!".format(line)
@@ -155,8 +240,8 @@ Your design includes a narrative element that emphasizes the importance of stayi
         ########################################################################
         #                          END OF YOUR CODE                            #
         ########################################################################
-        return ''.join(response)
-
+        # return ''.join(response)
+    
     @staticmethod
     def preprocess(text):
         """Do any general-purpose pre-processing before extracting information
@@ -180,12 +265,48 @@ Your design includes a narrative element that emphasizes the importance of stayi
         # your implementation to do any generic preprocessing, feel free to    #
         # leave this method unmodified.                                        #
         ########################################################################
+       
+       
 
         ########################################################################
         #                             END OF YOUR CODE                         #
         ########################################################################
 
         return text
+    
+    def reformat_movie_text(self, movie_title):
+         
+        newTitle = movie_title
+        pat1 = r"^(.*)\s+(\(\d{4}\))$"
+        x = re.match(pat1, newTitle)
+    
+        titleWOYear = newTitle
+        year = ""
+        
+        if x:
+            titleWOYear = x.group(1).strip()
+            # year = x.group(2).strip()
+            # ifYear= True
+            
+        #pat2 =  r"^([Aa]n?|[Tt]he)(.*)?"
+        #pat2 = r"^(.*?)(,\s*The|An|A)$"
+        #pat2 = r',\s*(The|An|A)$'
+        pat2 = r'^(.*?)(,\sThe|,\sAn|,\sA)$'
+        match = re.match(pat2, titleWOYear)
+        newTitle = titleWOYear
+
+        if match:
+            input_title = match.group(1).strip()
+            article = match.group(2).strip()
+            article = article[2:]
+            newTitle =  article + " " + input_title
+           
+        newTitle = newTitle.strip() + " " + year
+        # print("missing", self.titles[326], self.titles[1638], self.titles[8947])
+        # print("wrongGG", self.titles[4781])
+        
+        return newTitle
+        
     
     def extract_emotion(self, preprocessed_input):
         """LLM PROGRAMMING MODE: Extract an emotion from a line of pre-processed text.
@@ -220,7 +341,65 @@ Your design includes a narrative element that emphasizes the importance of stayi
         :returns: a list of emotions in the text or an empty list if no emotions found.
         Possible emotions are: "Anger", "Disgust", "Fear", "Happiness", "Sadness", "Surprise"
         """
-        return []
+
+        class extractEmotion(BaseModel):
+            ContainsAnger: bool = Field(default=False)
+            ContainsDisgust: bool = Field(default=False)
+            ContainsFear: bool = Field(default=False)
+            ContainsHappiness: bool = Field(default=False)
+            ContainsSadness: bool = Field(default=False)
+            ContainsSurprise: bool = Field(default=False)
+
+
+        #system_prompt = "You are an emotion extractor bot whose goal is to determine emotion from user input. For simplicity, we only require 6 emotions: anger, disgust, fear, happiness, sadness, and surprise. The user input  can have one, all, or none of these emotions. Read the user input and extract the emotions into a JSON object. Here are some examples of what emotions some examples would have:    "
+
+        system_prompt = """
+        You are a emotion extractor bot for determing emotions from user input. For simplicity, only use the followings 6 emotions: anger, disgust, fear, happiness, sadness and surprise. Extract the most prominent emotions in the user input into a JSON object. Look at the following examples
+         1. "I am angry at you for your bad recommendations"
+        Output: Anger
+
+        2. "Ugh that movie was a disaster"
+        Output: Disgust
+
+        3. "Ewww that movie was so gruesome!! Stop making stupid recommendations!!"
+        Output: Disgust, Anger
+
+        4. "Wait what? You recommended 'Titanic (1997)'???"
+        Output: Surprise
+
+        5. "What movies are you going to recommend today?"
+        Output: None
+
+        6. "Woah!!  That movie was so shockingly bad!  You had better stop making awful recommendations they're pissing me off."
+        Output: Anger, Surprise
+
+        7. "Ack, woah!  Oh my gosh, what was that?  Really startled me.  I just heard something really frightening!"
+        Ouput: Surprise, Fear
+
+        Make sure you output into a json object!
+        """
+        message = preprocessed_input
+        json_class = extractEmotion
+        response = util.json_llm_call(system_prompt, message, json_class)
+        # print("Response is:", response)
+
+        # response_dict = json.loads(response.json())
+
+        emotions = []
+        if 'ContainsAnger' in response and response['ContainsAnger'] == True:
+            emotions.append("Anger")
+        if 'ContainsDisgust' in response and response['ContainsDisgust'] == True:
+            emotions.append("Disgust")
+        if 'ContainsFear' in response and response['ContainsFear'] == True:
+            emotions.append("Fear") 
+        if 'ContainsHappiness' in response and response['ContainsHappiness'] == True:
+            emotions.append("Happiness")
+        if "ContainsSadness" in response and response['ContainsSadness'] == True:
+            emotions.append("Sadness")
+        if "ContainsSurprise" in response and response['ContainsSurprise'] == True:
+            emotions.append("Surprise")
+        
+        return emotions
 
     def extract_titles(self, preprocessed_input):
         """Extract potential movie titles from a line of pre-processed text.
@@ -267,17 +446,45 @@ Your design includes a narrative element that emphasizes the importance of stayi
 
         :param title: a string containing a movie title
         :returns: a list of indices of matching movies
-
-        
         """
-        newTitle = title
-        answer = []
+        class Translator(BaseModel):
+            Translation: str = Field(default="")
 
+        if self.llm_enabled:
+            system_prompt = """
+            You are the Moviebot Translator, specifically designed to translate movie titles from German, Spanish, French, Danish, or Italian into English. Your task is to accurately translate a given movie title into English, ensuring to retain the original format of the input. Here’s how you should operate:
+
+            - If the movie title is in one of the specified languages, translate it to English, maintaining any additional information like release year in parentheses. For example, given 'Der Dunkle Ritter (2008)', you should translate this to 'The Dark Knight (2008)'.
+
+            - If the title is already in English or does not require translation, simply return the original input. For instance, 'Titanic (1997)' remains 'Titanic (1997)'.
+
+            - Ensure to accurately identify and translate titles that might be less obvious or have minor differences from the English title, e.g., 'Jernmand' should be translated to 'Iron Man', and 'Junglebogen' to 'The Jungle Book'.
+
+            Your output should be a JSON object containing the translation. Here are the parameters for your function:
+
+            - `system_prompt`: A detailed description of your task as the Moviebot Translator.
+            - `message`: The movie title to be translated.
+            - `json_class`: The data structure to hold the translation result.
+
+            Use the information provided to translate the movie title and extract the translation into the specified JSON object format.
+            """
+            message = title
+            json_class = Translator
+            response = util.json_llm_call(system_prompt, message, json_class)
+            #print("response is:", response)
+            responseTitle = response['Translation']
+            title = responseTitle
+
+        #print("English title is:", title)
+
+        answer = []
+        newTitle = title
         pat1 = r"^(.*)\s+(\(\d{4}\))$"
-        x = re.match(pat1, title)
-        titleWOYear = title
+        x = re.match(pat1, newTitle)
+        titleWOYear = newTitle
         year = ""
         ifYear = False
+        
         if x:
             titleWOYear = x.group(1).strip()
             year = x.group(2).strip()
@@ -285,14 +492,17 @@ Your design includes a narrative element that emphasizes the importance of stayi
             
         pat2 =  r"^([Aa]n?|[Tt]he)(.*)?"
         match = re.match(pat2, titleWOYear)
-        
+        variation = titleWOYear
+
         if match:
+    
             article = match.group(1).strip()
             input_title = match.group(2).strip()
             newTitle = input_title + ", " + article + " " + year
-
+           
         newTitle = newTitle.strip()
-        
+        # print("missing", self.titles[326], self.titles[1638], self.titles[8947])
+        # print("wrongGG", self.titles[4781])
         for index, movie in enumerate(self.titles):
 
             currTitle = movie[0]
@@ -301,12 +511,12 @@ Your design includes a narrative element that emphasizes the importance of stayi
             if y:
                 titleWOYear2 = y.group(1).strip()
             if ifYear:
-                if newTitle == currTitle:
+                if newTitle == currTitle or variation == currTitle:
                     answer.append(index)
+               
             else:
-                if newTitle == titleWOYear2:
+                if newTitle == titleWOYear2 or variation == titleWOYear2:
                     answer.append(index)
-
         return answer
 
     def extract_sentiment(self, preprocessed_input):
@@ -335,7 +545,7 @@ Your design includes a narrative element that emphasizes the importance of stayi
         inputWOTitle = re.sub(r'"(.*?)"', '', preprocessed_input)
         inputWOTitle = inputWOTitle.strip()
      
-        words = inputWOTitle.split()
+        words = inputWOTitle.lower().split()
  
         positive_count = 0
         negative_count = 0
